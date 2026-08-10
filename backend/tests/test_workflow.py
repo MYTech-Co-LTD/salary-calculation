@@ -389,7 +389,7 @@ def test_export_ledger_has_tags_and_fields(tmp_path, client):
     comm_idx = headers.index("提成金额")
     data_rows = rows[1:]
     tags = {row[tag_idx] for row in data_rows if row[tag_idx]}
-    known_tags = {"有效计提", "退货冲抵", "退货未匹配", "赠送剔除", "不计提成", "非乳品"}
+    known_tags = {"有效计提", "退货冲抵", "退货未匹配", "赠送剔除", "赠送扣除", "不计提成", "非乳品"}
     assert tags & known_tags, f"无已知 fate 标签: {tags}"
     # 至少一行有非空提成金额
     assert any(row[comm_idx] not in (None, 0, 0.0) for row in data_rows), "无提成金额"
