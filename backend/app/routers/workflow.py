@@ -249,6 +249,23 @@ def check_anomalies(
     # 异常4: 商品信息不完整
     checker.check_products_complete(barcodes)
 
+    # 异常7: 赠送件数不符（仅当导入了让利明细）
+    if m.gifts_file:
+        from salary_engine.importer import load_gift_qty_map_xlsx
+        from backend.app.services.engine_bridge import gift_deduction_from_db
+        gift_qty_map = load_gift_qty_map_xlsx(m.gifts_file)
+        # 销售件数按 (receipt,barcode) 聚合（仅非退货行）
+        sales_qty_map: Dict[tuple, Decimal] = {}
+        names: Dict[tuple, str] = {}
+        for s in sales:
+            if s.is_return:
+                continue
+            k = (s.receipt, s.barcode)
+            sales_qty_map[k] = sales_qty_map.get(k, Decimal(0)) + Decimal(str(s.qty))
+            names.setdefault(k, s.product_name)
+        confirmed_keys = set(gift_deduction_from_db(db, month).keys())
+        checker.check_gift_qty_mismatch(sales_qty_map, gift_qty_map, confirmed_keys, names)
+
     # 清除旧异常
     db.query(Anomaly).filter(Anomaly.month == month).delete()
 
@@ -284,6 +301,8 @@ def _run_compute(db, month: str):
     duty_override = {k: v for k, v in duty_override_from_db(db, month).items()
                      if k[0] not in excluded_stores}
     gifts = load_gift_keys_xlsx(m.gifts_file) if m.gifts_file else set()
+    from backend.app.services.engine_bridge import gift_deduction_from_db
+    gift_deduction = gift_deduction_from_db(db, month)
     # 使用锁定的工资策略版本，若无则用当前激活版本（ADR-009：策略存百分数，边界 ÷100）
     try:
         rate_table = rates_from_db(db, m.policy_version_id)
@@ -297,6 +316,7 @@ def _run_compute(db, month: str):
         rate_table=rate_table,
         month=month, days=days_in_month(month),
         gift_keys=gifts,
+        gift_deduction=gift_deduction,
         duty_override=duty_override,
         excluded_stores=excluded_stores,
     )

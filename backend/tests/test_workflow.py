@@ -650,3 +650,25 @@ def test_gift_deduction_model_persists(db_session):
     rows = db_session.query(GiftDeduction).filter_by(month="2026-06").all()
     assert len(rows) == 1
     assert rows[0].deduct_qty == 1
+
+
+def _gifts_xlsx(path, rows):
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(["序号", "订单号/小票单号", "国际条码", "数量", "商品名称"])
+    for r in rows:
+        ws.append(r)
+    wb.save(path)
+
+
+def test_check_anomalies_gift_qty_mismatch(tmp_path, client):
+    h = auth_header(client)
+    # 复用脚手架建好已算月份（含1笔销售 R001/6920001 qty1）
+    _setup_computed_month(tmp_path, client, h)
+    # 让利表登记 R001/6920001 赠送2件 → 与销售1件不符 → type7
+    g = tmp_path / "gifts.xlsx"
+    _gifts_xlsx(g, [["1", "R001", "6920001", "2", "低温奶"]])
+    with open(g, "rb") as f:
+        client.post("/months/2026-06/import-gifts", headers=h, files={"file": ("gifts.xlsx", f)})
+    r = client.post("/months/2026-06/check-anomalies", headers=h)
+    types = [a["anomaly_type"] for a in r.json()["anomalies"]]
+    assert "7" in types
