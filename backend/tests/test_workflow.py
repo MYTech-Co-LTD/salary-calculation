@@ -638,3 +638,15 @@ def test_master_data_change_marks_computed_month_stale(tmp_path, client, db_sess
     db_session.expire_all()
     assert db_session.get(Month, "2026-06").results_stale is True, (
         "改商品后 computed 月份应 results_stale=True（ADR-014）")
+
+
+def test_gift_deduction_model_persists(db_session):
+    from backend.app.db import GiftDeduction
+    db_session.add(GiftDeduction(month="2026-06", receipt="R1", barcode="6920001",
+                                 sales_qty=3, gift_qty=1, deduct_qty=1,
+                                 reason="销售3件/赠送1件，已扣除1件",
+                                 resolution="已确认扣除", status="confirmed"))
+    db_session.commit()
+    rows = db_session.query(GiftDeduction).filter_by(month="2026-06").all()
+    assert len(rows) == 1
+    assert rows[0].deduct_qty == 1

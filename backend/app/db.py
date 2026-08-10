@@ -201,7 +201,7 @@ class Anomaly(Base):
     __tablename__ = "anomalies"
     id = Column(Integer, primary_key=True)
     month = Column(String, nullable=False, index=True)  # YYYY-MM
-    anomaly_type = Column(String(10), nullable=False)  # 1-6
+    anomaly_type = Column(String(10), nullable=False)  # 1-7（7=赠送件数不符）
     entity_type = Column(String(50))  # store/product/gift/refund
     entity_id = Column(String(100))  # 门店名/条码等
     description = Column(String(500))
@@ -209,6 +209,23 @@ class Anomaly(Base):
     resolution = Column(String(200))
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
+
+
+class GiftDeduction(Base):
+    """赠送件数不符——人工确认扣除记录（compute 读取，影响计算；ADR-023）"""
+    __tablename__ = "gift_deductions"
+    id = Column(Integer, primary_key=True)
+    month = Column(String, nullable=False, index=True)
+    receipt = Column(String, nullable=False)
+    barcode = Column(String, nullable=False)
+    sales_qty = Column(Numeric)
+    gift_qty = Column(Numeric)
+    deduct_qty = Column(Numeric)      # 实际扣除件数 = min(|gift|,|sales|)，带符号
+    reason = Column(String(300))
+    resolution = Column(String(300))
+    status = Column(String(20), default="confirmed")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    __table_args__ = (UniqueConstraint("month", "receipt", "barcode", name="uq_gift_deduction"),)
 
 
 def mark_all_months_stale(db):
