@@ -62,6 +62,7 @@ class GiftDeduction(Base):
 - sales 聚合：`{(receipt,barcode): 销售件数(带符号)}`（从 SalesRecord）
 - 对每个在 `gift_qty_map` 的 key：
   - `key in confirmed_keys`（已确认）→ 跳过
+  - `gift_q <= 0`（退货赠送/0件）→ 跳过（走现有 gift_keys 剔除逻辑，不进 type7）
   - `sales_qty != gift_qty` → 产异常 `anomaly_type="7"`, `entity_type="gift"`, `entity_id="{receipt}|{barcode}"`, `description="赠送件数不符 | 销售件数:X | 赠送件数:Y | 商品名:Z"`
 - `workflow.py:check_anomalies` 调用前：解析 gifts xlsx 为 gift_qty_map、查 GiftDeduction 得 confirmed_keys
 

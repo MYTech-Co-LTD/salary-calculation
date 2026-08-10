@@ -240,13 +240,13 @@
   - 原因 / 处理情况存 `GiftDeduction.reason/resolution`；**不改原始 SalesRecord**。
 - **影响**：
   - 新表 `GiftDeduction(month,receipt,barcode,sales_qty,gift_qty,deduct_qty,reason,resolution,status,created_at)`，唯一键 (month,receipt,barcode)；迁移脚本（ADR-016 entrypoint 自动跑）。
-  - `anomaly_checker.py` 加 `check_gift_qty_mismatch()`（解析 gifts xlsx"数量"列 vs SalesRecord 聚合件数，产 type "7"；已确认组不重复产）。
+  - `anomaly_checker.py` 加 `check_gift_qty_mismatch()`（解析 gifts xlsx"数量"列 vs SalesRecord 聚合件数，产 type "7"；已确认组不重复产；**退货赠送 gift_qty≤0 豁免**——走现有 gift_keys 剔除，不进 type7）。
   - `calculator.py` 加参数 `gift_deduction={(receipt,barcode):deduct_qty}`；命中组分叉——在 gift_deduction 则进聚合按均摊扣（tag "赠送扣除"）、否则整组剔（现状）。
   - `engine_bridge.py` 加 `gift_deduction_from_db`；`workflow.py:_run_compute` 装配 + 新端点 `POST /months/{month}/gift-deduction/confirm`（仿 PUT /duty）。
   - 前端 `AnomalyPanel` ANOMALY_TYPES 加 "7" + "确认扣除"按钮；`api.ts` 加封装。
   - `db.py` 注释 1-6 → 1-7；`test_workflow.py:392` known_tags 加"赠送扣除"。
   - 不让利明细整体落库；不弹窗输入件数；不给 SalesRecord 加列；不改 importer。
-- **决策过程**：用户问"同小票买多件只送1件怎么处理"（2026-08-10）→ 6 月数据验证 0 案例 → 用户先选"加异常不改计算"，再明确为"进异常排查 + 确认扣除 + 打标签 + 注明原因和处理情况" → 金额口径选"按件数均摊"、件数口径选"默认扣 min(赠送,销售) 一键确认"。spec：`docs/superpowers/specs/2026-08-10-gift-qty-mismatch-design.md`
+- **决策过程**：用户问"同小票买多件只送1件怎么处理"（2026-08-10）→ 6 月数据验证 0 案例 → 用户先选"加异常不改计算"，再明确为"进异常排查 + 确认扣除 + 打标签 + 注明原因和处理情况" → 金额口径选"按件数均摊"、件数口径选"默认扣 min(赠送,销售) 一键确认"。**实现后 T9 真实 6 月数据验证发现退货赠送（gift_qty 负数）被误报 type7（4 个），用户裁定豁免 gift_qty≤0（2026-08-10）**。spec：`docs/superpowers/specs/2026-08-10-gift-qty-mismatch-design.md`
 
 ## ADR-014 主数据变更标 stale（治 H1）✅
 
