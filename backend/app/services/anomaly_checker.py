@@ -1,3 +1,4 @@
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy.orm import Session
@@ -112,6 +113,27 @@ class AnomalyChecker:
                     "description": f"「{p.barcode}」缺少{'、'.join(missing)}{extra_info}",
                     "status": "pending",
                 })
+
+    def check_gift_qty_mismatch(self, sales_qty_map, gift_qty_map, confirmed_keys, names):
+        """异常7: 赠送件数不符——销售件数 ≠ 让利表赠送件数（仅非退货行对比）"""
+        for key, gift_q in gift_qty_map.items():
+            if key in confirmed_keys:
+                continue
+            sales_q = sales_qty_map.get(key, Decimal(0))
+            if sales_q == gift_q:
+                continue
+            receipt, barcode = key
+            name = names.get(key, "")
+            extra = f" | 单号: {receipt} | 条码: {barcode} | 商品名: {name}"
+            extra += f" | 销售件数: {sales_q} | 赠送件数: {gift_q}"
+            self.anomalies.append({
+                "month": self.month,
+                "anomaly_type": "7",
+                "entity_type": "gift",
+                "entity_id": f"{receipt}|{barcode}",
+                "description": f"赠送件数不符{extra}",
+                "status": "pending",
+            })
 
     def get_anomalies(self) -> List[Dict[str, Any]]:
         return self.anomalies
