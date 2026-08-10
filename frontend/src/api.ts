@@ -252,4 +252,7 @@ export const dutyTransferApi = {
 export const workflowApiExtended = {
   checkAnomalies: (month: string) =>
     http.post<{ total: number; anomalies: any[] }>(`/months/${month}/check-anomalies`).then(r => r.data),
+  confirmGiftDeduction: (month: string, anomalyId: number) =>
+    http.post<{ deduct_qty: number; deduct_amt: number }>(
+      `/months/${month}/gift-deduction/confirm`, { anomaly_id: anomalyId }).then(r => r.data),
 };

@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { anomalyApi, storesApi, productsApi, targetsApi, type Anomaly } from "../../api";
+import { anomalyApi, storesApi, productsApi, targetsApi, workflowApiExtended, type Anomaly } from "../../api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
@@ -33,6 +33,7 @@ const ANOMALY_TYPES: Record<string, { label: string; icon: ReactNode; color: str
   "4": { label: "商品信息不完整", icon: <FileText className="w-5 h-5" />, color: "text-amber-600 bg-amber-50 border-amber-200" },
   "5": { label: "赠送未匹配", icon: <Gift className="w-5 h-5" />, color: "text-blue-600 bg-blue-50 border-blue-200" },
   "6": { label: "退款未关联", icon: <RotateCcw className="w-5 h-5" />, color: "text-blue-600 bg-blue-50 border-blue-200" },
+  "7": { label: "赠送件数不符", icon: <Gift className="w-5 h-5" />, color: "text-blue-600 bg-blue-50 border-blue-200" },
 };
 
 // 从描述中提取信息
@@ -47,6 +48,10 @@ function parseDescription(desc: string): Record<string, string> {
     { key: "store_class", regex: /类别:\s*([^|]+)/ },
     { key: "salespersons", regex: /涉及营业员:\s*([^|]+)/ },
     { key: "count", regex: /交易笔数:\s*(\d+)/ },
+    { key: "receipt", regex: /单号:\s*([^|]+)/ },
+    { key: "barcode", regex: /条码:\s*([^|]+)/ },
+    { key: "sales_qty", regex: /销售件数:\s*([^|]+)/ },
+    { key: "gift_qty", regex: /赠送件数:\s*([^|]+)/ },
   ];
   for (const p of patterns) {
     const match = desc.match(p.regex);
@@ -258,6 +263,18 @@ export default function AnomalyPanel({ month, onResolved }: AnomalyPanelProps) {
     }
   };
 
+  // 类型7: 确认按件数扣除
+  const handleConfirmDeduct = async (item: Anomaly) => {
+    try {
+      const r = await workflowApiExtended.confirmGiftDeduction(month, item.id);
+      toast.success(`已确认扣除 ${r.deduct_qty} 件`);
+      load();
+      onResolved();
+    } catch {
+      toast.error("确认扣除失败");
+    }
+  };
+
   // 按类型统计
   const typeCounts: Record<string, number> = {};
   Object.keys(ANOMALY_TYPES).forEach((t) => (typeCounts[t] = 0));
@@ -331,6 +348,8 @@ export default function AnomalyPanel({ month, onResolved }: AnomalyPanelProps) {
                         {info.store_class && <span className="text-xs text-zinc-500">类别: {info.store_class}</span>}
                         {info.salespersons && <span className="text-xs text-zinc-500">营业员: {info.salespersons}</span>}
                         {info.count && <span className="text-xs text-zinc-500">笔数: {info.count}</span>}
+                        {info.sales_qty && <span className="text-xs text-zinc-500">销售件数: {info.sales_qty}</span>}
+                        {info.gift_qty && <span className="text-xs text-zinc-500">赠送件数: {info.gift_qty}</span>}
                       </div>
                     </div>
                     <div className="flex gap-1.5 shrink-0">
@@ -382,6 +401,17 @@ export default function AnomalyPanel({ month, onResolved }: AnomalyPanelProps) {
                           </Button>
                           <Button size="sm" onClick={() => handleDeductSales(item.id)}>
                             <RotateCcw className="w-3 h-3 mr-1" />扣减营业额
+                          </Button>
+                        </>
+                      )}
+                      {/* 类型7: 确认扣除 / 忽略 */}
+                      {expandedType === "7" && (
+                        <>
+                          <Button size="sm" variant="outline" onClick={() => handleIgnore(item.id)}>
+                            <X className="w-3 h-3 mr-1" />忽略
+                          </Button>
+                          <Button size="sm" onClick={() => handleConfirmDeduct(item)}>
+                            <Gift className="w-3 h-3 mr-1" />确认扣除
                           </Button>
                         </>
                       )}
