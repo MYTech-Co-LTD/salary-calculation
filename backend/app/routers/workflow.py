@@ -97,6 +97,10 @@ class DutyBatch(BaseModel):
     items: list[DutyItem]
 
 
+class GiftDeductionConfirm(BaseModel):
+    anomaly_id: int
+
+
 @router.post("/months/{month}/infer-duty")
 def infer(month: str, _: User = Depends(current_user), db: Session = Depends(get_db)):
     m = _get_month(db, month)
@@ -122,6 +126,55 @@ def set_duty(month: str, body: DutyBatch,
     m.results_stale = True
     db.commit()
     return {"saved": len(body.items)}
+
+
+@router.post("/months/{month}/gift-deduction/confirm")
+def confirm_gift_deduction(month: str, body: GiftDeductionConfirm,
+                           _: User = Depends(current_user), db: Session = Depends(get_db)):
+    """确认按件数扣除赠送（ADR-023）。从 anomaly 反查 receipt|barcode，算 min(赠送,销售)。"""
+    from datetime import datetime
+    from salary_engine.importer import load_gift_keys_xlsx, load_gift_qty_map_xlsx
+    from backend.app.db import GiftDeduction, SalesRecord, Anomaly as AnomalyRow
+    from backend.app.services.engine_bridge import sales_lines_from_db
+
+    m = _get_month(db, month)
+    anom = db.get(AnomalyRow, body.anomaly_id)
+    if not anom or anom.month != month or anom.anomaly_type != "7":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "异常不存在或类型不符")
+    if "|" not in (anom.entity_id or ""):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "异常 entity_id 格式错误")
+    receipt, barcode = anom.entity_id.split("|", 1)
+
+    # 让利件数
+    gift_q = Decimal(0)
+    if m.gifts_file:
+        gift_q = load_gift_qty_map_xlsx(m.gifts_file).get((receipt, barcode), Decimal(0))
+    # 销售件数（仅非退货，带符号）
+    sales_q = Decimal(0)
+    for r in db.query(SalesRecord).filter_by(month=month, receipt=receipt, barcode=barcode).all():
+        if not r.is_return:
+            sales_q += Decimal(str(r.qty))
+    # deduct = min(|gift|, |sales|)，符号跟随 gift（销售赠品正 / 退货赠品负）
+    sign = -1 if gift_q < 0 else 1
+    deduct_qty = Decimal(sign) * min(abs(gift_q), abs(sales_q))
+    # 预览扣除额（均摊）
+    sales_amt = sum((Decimal(str(r.amount)) for r in db.query(SalesRecord)
+                     .filter_by(month=month, receipt=receipt, barcode=barcode).all()
+                     if not r.is_return), Decimal(0))
+    deduct_amt = sales_amt * (deduct_qty / sales_q) if sales_q else Decimal(0)
+
+    reason = f"销售{sales_q}件/赠送{gift_q}件，已扣除{deduct_qty}件"
+    resolution = f"已确认扣除，扣除额{deduct_amt:.2f}元"
+    db.query(GiftDeduction).filter_by(month=month, receipt=receipt, barcode=barcode).delete()
+    db.add(GiftDeduction(month=month, receipt=receipt, barcode=barcode,
+                         sales_qty=sales_q, gift_qty=gift_q, deduct_qty=deduct_qty,
+                         reason=reason, resolution=resolution, status="confirmed"))
+    anom.status = "resolved"
+    anom.resolution = resolution
+    anom.resolved_at = datetime.utcnow()
+    m.results_stale = True
+    db.commit()
+    return {"deduct_qty": deduct_qty, "deduct_amt": deduct_amt}
 
 
 @router.get("/months/{month}/duty")

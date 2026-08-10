@@ -672,3 +672,21 @@ def test_check_anomalies_gift_qty_mismatch(tmp_path, client):
     r = client.post("/months/2026-06/check-anomalies", headers=h)
     types = [a["anomaly_type"] for a in r.json()["anomalies"]]
     assert "7" in types
+
+
+def test_confirm_gift_deduction(tmp_path, client, db_session):
+    from backend.app.db import GiftDeduction, Anomaly
+    h = auth_header(client)
+    _setup_computed_month(tmp_path, client, h)
+    g = tmp_path / "gifts.xlsx"
+    _gifts_xlsx(g, [["1", "R001", "6920001", "2", "低温奶"]])
+    with open(g, "rb") as f:
+        client.post("/months/2026-06/import-gifts", headers=h, files={"file": ("gifts.xlsx", f)})
+    client.post("/months/2026-06/check-anomalies", headers=h)
+    anom = db_session.query(Anomaly).filter_by(month="2026-06", anomaly_type="7").one()
+    r = client.post("/months/2026-06/gift-deduction/confirm", headers=h, json={"anomaly_id": anom.id})
+    assert r.status_code == 200
+    assert r.json()["deduct_qty"] == 1  # min(销售1, 赠送2)
+    gd = db_session.query(GiftDeduction).filter_by(month="2026-06").one()
+    assert gd.deduct_qty == 1
+    assert anom.status == "resolved" or db_session.get(Anomaly, anom.id).status == "resolved"
