@@ -2,7 +2,7 @@
 
 > 本文件是项目架构决策的**权威记录**，记录每个已确认架构决策的**决策过程**（背景 / 备选 / 理由 / 影响），遵守 `CLAUDE.md` 铁律 3、4。详细设计见 `docs/superpowers/specs/`；本文只锁"是什么 + 为什么"。
 
-- 最近更新：2026-08-06（ADR-021 导出预生成缓存）
+- 最近更新：2026-08-10（ADR-023 赠送件数不符异常 + 确认按件数扣除）
 - 状态图例：✅ 已确认（锁定） · 📋 已规划后续
 - **本轮（计算数据流重构）架构已全部确认**（2026-07-19），可进入 writing-plans。
 
@@ -226,6 +226,27 @@
   - env：`OSS_ENDPOINT_INTERNAL` / `OSS_ENDPOINT_PUBLIC` / `OSS_BUCKET` / `OSS_ACCESS_KEY` / `OSS_SECRET_KEY` / `OSS_REGION` / `OSS_PREFIX`（默认 `salary/`）。
   - `requirements.txt` 加 `boto3`。
 - **决策过程**：用户确认走天翼云 OBS（2026-08-06），提供 AK/SK/桶 `mytech-lesson`/内网+公网 endpoint。spec：`docs/superpowers/specs/2026-08-06-export-oss.md`
+
+## ADR-023 赠送件数不符：异常排查 + 人工确认按件数扣除 ✅
+
+- **决策**：销售流水与让利明细按 `(receipt,barcode)` 匹配后，若**销售件数 ≠ 让利表赠送件数**，进异常排查（type "7"）；用户在 AnomalyPanel 点"确认扣除"后，compute 按 `min(赠送,销售)` 件、**按件数均摊金额**扣除，剩余计提成，该组 DetailRow 打"赠送扣除"标签。**件数相等组维持现状**（自动整组剔除，零变化）。
+- **背景**：原 `(receipt,barcode) in gift_keys` 命中即整组剔除（`calculator.py:67`），**无数量意识**。6 月真实数据交叉验证：gift_keys 2444 个 100% 命中，销售件数全部 == 赠送件数（"买多于送" 0 个）→ 现状精确；但理论存在"同组买3送1"会被整组剔除（多剔2件）的静默风险。
+- **备选**：(A) 维持现状 + 仅文档记录假设（YAGNI，0 案例，但未来异常静默多剔）；(B) 进异常排查 + 确认扣除走"独立表 + compute 参数"正路（选）；(C) 自动精确按数量剔除（无人工把关，金额拆分口径未确认即生效，风险高，弃）。
+- **理由（选 B）**：复用现有异常排查体系（AnomalyChecker / Anomaly 表 / AnomalyPanel 前端软门禁）+ 复用 duty_override 的"确认影响计算"正模板（独立 GiftDeduction 表 + compute 新参数）。**关键：确认状态存独立 GiftDeduction 表而非 Anomaly 表**——Anomaly 表是快照式（每次 check 先 delete 再重建，`workflow.py:253`），存那里会被下次检查清掉。calculator 只需新增 `gift_deduction` 参数，**`gift_keys` 保持 set 不改、importer 不改**（checker 内部独立解析 xlsx 拿数量），影响面最小。
+- **口径（用户确认 2026-08-10）**：
+  - 扣除件数 = `min(赠送件数, 销售件数)`，**一键确认**（不弹输入框）；销售 < 赠送 → 扣到销售件数为止（全剔）+ 标异常。
+  - 扣除金额 = 组总额 × (扣除件数 / 销售件数)（**按件数均摊**，与单行单价差异无关）；件数相等时与"整组剔除"金额完全一致。
+  - 不符但被"忽略" → 维持整组剔除（现状），异常说明告知。
+  - 原因 / 处理情况存 `GiftDeduction.reason/resolution`；**不改原始 SalesRecord**。
+- **影响**：
+  - 新表 `GiftDeduction(month,receipt,barcode,sales_qty,gift_qty,deduct_qty,reason,resolution,status,created_at)`，唯一键 (month,receipt,barcode)；迁移脚本（ADR-016 entrypoint 自动跑）。
+  - `anomaly_checker.py` 加 `check_gift_qty_mismatch()`（解析 gifts xlsx"数量"列 vs SalesRecord 聚合件数，产 type "7"；已确认组不重复产）。
+  - `calculator.py` 加参数 `gift_deduction={(receipt,barcode):deduct_qty}`；命中组分叉——在 gift_deduction 则进聚合按均摊扣（tag "赠送扣除"）、否则整组剔（现状）。
+  - `engine_bridge.py` 加 `gift_deduction_from_db`；`workflow.py:_run_compute` 装配 + 新端点 `POST /months/{month}/gift-deduction/confirm`（仿 PUT /duty）。
+  - 前端 `AnomalyPanel` ANOMALY_TYPES 加 "7" + "确认扣除"按钮；`api.ts` 加封装。
+  - `db.py` 注释 1-6 → 1-7；`test_workflow.py:392` known_tags 加"赠送扣除"。
+  - 不让利明细整体落库；不弹窗输入件数；不给 SalesRecord 加列；不改 importer。
+- **决策过程**：用户问"同小票买多件只送1件怎么处理"（2026-08-10）→ 6 月数据验证 0 案例 → 用户先选"加异常不改计算"，再明确为"进异常排查 + 确认扣除 + 打标签 + 注明原因和处理情况" → 金额口径选"按件数均摊"、件数口径选"默认扣 min(赠送,销售) 一键确认"。spec：`docs/superpowers/specs/2026-08-10-gift-qty-mismatch-design.md`
 
 ## ADR-014 主数据变更标 stale（治 H1）✅
 
