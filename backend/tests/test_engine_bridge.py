@@ -107,3 +107,15 @@ def test_sales_lines_from_db_carries_id():
         assert lines[0].receipt == "R1"
     finally:
         db.query(SalesRecord).filter_by(receipt="R1").delete(); db.commit(); db.close()
+
+
+def test_gift_deduction_from_db(db_session):
+    from decimal import Decimal
+    from backend.app.db import GiftDeduction
+    from backend.app.services.engine_bridge import gift_deduction_from_db
+    db_session.add(GiftDeduction(month="2026-06", receipt="R1", barcode="6920001",
+                                 sales_qty=3, gift_qty=1, deduct_qty=1,
+                                 reason="", resolution="", status="confirmed"))
+    db_session.commit()
+    out = gift_deduction_from_db(db_session, "2026-06")
+    assert out == {("R1", "6920001"): Decimal(1)}

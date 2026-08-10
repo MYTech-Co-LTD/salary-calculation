@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from salary_engine.models import Product, Store, RateTable, SalesLine
 from backend.app.db import Product as ProductRow, Store as StoreRow
-from backend.app.db import MonthlyTarget, SalaryPolicyVersion, Duty, SalesRecord
+from backend.app.db import MonthlyTarget, SalaryPolicyVersion, Duty, SalesRecord, GiftDeduction
 
 
 def days_in_month(month: str) -> int:
@@ -54,6 +54,12 @@ def targets_from_db(db, month: str) -> dict:
 def duty_override_from_db(db, month: str) -> dict:
     return {(r.store, r.duty_date): r.salesperson
             for r in db.query(Duty).filter_by(month=month).all()}
+
+
+def gift_deduction_from_db(db, month: str) -> dict:
+    """已确认的赠送扣除 → {(receipt,barcode): deduct_qty}（带符号，ADR-023）。"""
+    return {(r.receipt, r.barcode): Decimal(str(r.deduct_qty))
+            for r in db.query(GiftDeduction).filter_by(month=month).all()}
 
 
 def sales_lines_from_db(db, month: str) -> list:
