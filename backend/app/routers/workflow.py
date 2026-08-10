@@ -133,9 +133,8 @@ def confirm_gift_deduction(month: str, body: GiftDeductionConfirm,
                            _: User = Depends(current_user), db: Session = Depends(get_db)):
     """确认按件数扣除赠送（ADR-023）。从 anomaly 反查 receipt|barcode，算 min(赠送,销售)。"""
     from datetime import datetime
-    from salary_engine.importer import load_gift_keys_xlsx, load_gift_qty_map_xlsx
+    from salary_engine.importer import load_gift_qty_map_xlsx
     from backend.app.db import GiftDeduction, SalesRecord, Anomaly as AnomalyRow
-    from backend.app.services.engine_bridge import sales_lines_from_db
 
     m = _get_month(db, month)
     anom = db.get(AnomalyRow, body.anomaly_id)
@@ -149,18 +148,17 @@ def confirm_gift_deduction(month: str, body: GiftDeductionConfirm,
     gift_q = Decimal(0)
     if m.gifts_file:
         gift_q = load_gift_qty_map_xlsx(m.gifts_file).get((receipt, barcode), Decimal(0))
-    # 销售件数（仅非退货，带符号）
+    # 一次遍历同时累加销售件数与金额（仅非退货行）——M2：合并原两次 filter_by 遍历
     sales_q = Decimal(0)
+    sales_amt = Decimal(0)
     for r in db.query(SalesRecord).filter_by(month=month, receipt=receipt, barcode=barcode).all():
         if not r.is_return:
             sales_q += Decimal(str(r.qty))
+            sales_amt += Decimal(str(r.amount))
     # deduct = min(|gift|, |sales|)，符号跟随 gift（销售赠品正 / 退货赠品负）
     sign = -1 if gift_q < 0 else 1
     deduct_qty = Decimal(sign) * min(abs(gift_q), abs(sales_q))
     # 预览扣除额（均摊）
-    sales_amt = sum((Decimal(str(r.amount)) for r in db.query(SalesRecord)
-                     .filter_by(month=month, receipt=receipt, barcode=barcode).all()
-                     if not r.is_return), Decimal(0))
     deduct_amt = sales_amt * (deduct_qty / sales_q) if sales_q else Decimal(0)
 
     reason = f"销售{sales_q}件/赠送{gift_q}件，已扣除{deduct_qty}件"
@@ -238,7 +236,7 @@ from salary_engine.calculator import compute, clean_store as _clean
 from salary_engine.onduty import infer_duty as _infer
 from backend.app.services.engine_bridge import (
     rates_from_db, products_from_db, stores_from_db, targets_from_db,
-    duty_override_from_db, days_in_month, sales_lines_from_db,
+    duty_override_from_db, days_in_month, sales_lines_from_db, gift_deduction_from_db,
 )
 from backend.app.db import (
     Result, DetailRow, SalaryPolicyVersion,
@@ -305,7 +303,6 @@ def check_anomalies(
     # 异常7: 赠送件数不符（仅当导入了让利明细）
     if m.gifts_file:
         from salary_engine.importer import load_gift_qty_map_xlsx
-        from backend.app.services.engine_bridge import gift_deduction_from_db
         gift_qty_map = load_gift_qty_map_xlsx(m.gifts_file)
         # 销售件数按 (receipt,barcode) 聚合（仅非退货行）
         sales_qty_map: Dict[tuple, Decimal] = {}
@@ -354,7 +351,6 @@ def _run_compute(db, month: str):
     duty_override = {k: v for k, v in duty_override_from_db(db, month).items()
                      if k[0] not in excluded_stores}
     gifts = load_gift_keys_xlsx(m.gifts_file) if m.gifts_file else set()
-    from backend.app.services.engine_bridge import gift_deduction_from_db
     gift_deduction = gift_deduction_from_db(db, month)
     # 使用锁定的工资策略版本，若无则用当前激活版本（ADR-009：策略存百分数，边界 ÷100）
     try:

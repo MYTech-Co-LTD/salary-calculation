@@ -114,7 +114,10 @@ class AnomalyChecker:
                     "status": "pending",
                 })
 
-    def check_gift_qty_mismatch(self, sales_qty_map, gift_qty_map, confirmed_keys, names):
+    def check_gift_qty_mismatch(self, sales_qty_map: Dict[tuple, Decimal],
+                                gift_qty_map: Dict[tuple, Decimal],
+                                confirmed_keys: Set[tuple],
+                                names: Dict[tuple, str]):
         """异常7: 赠送件数不符——销售件数 ≠ 让利表赠送件数（仅非退货行对比）"""
         for key, gift_q in gift_qty_map.items():
             if key in confirmed_keys:

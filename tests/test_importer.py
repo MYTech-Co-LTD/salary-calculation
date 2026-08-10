@@ -1,6 +1,7 @@
 from decimal import Decimal
 from salary_engine.importer import (load_products_from_rows, load_stores_from_rows,
-                                    load_sales_from_rows, load_gift_keys_from_rows)
+                                    load_sales_from_rows, load_gift_keys_from_rows,
+                                    load_gift_qty_map_from_rows)
 
 
 def test_load_products_merges_cost():
@@ -68,9 +69,6 @@ def test_load_stores_tolerates_spaced_header():
     stores, targets = load_stores_from_rows(rows)
     assert "福景店" in stores
     assert targets["福景店"] == Decimal("84000")
-
-
-from salary_engine.importer import load_gift_qty_map_from_rows
 
 
 def test_load_gift_qty_map_aggregates_same_key():

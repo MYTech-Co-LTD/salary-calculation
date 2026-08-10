@@ -675,9 +675,15 @@ def test_check_anomalies_gift_qty_mismatch(tmp_path, client):
 
 
 def test_confirm_gift_deduction(tmp_path, client, db_session):
-    from backend.app.db import GiftDeduction, Anomaly
+    from backend.app.db import GiftDeduction, Anomaly, Month, DetailRow
+    from decimal import Decimal
     h = auth_header(client)
     _setup_computed_month(tmp_path, client, h)
+    # 原始组总额（首次 compute 时 R001/6920001 有效计提）：qty1 × 单价3 = 3
+    orig_group_total = sum(
+        (d.amount for d in db_session.query(DetailRow).filter_by(
+            month="2026-06", barcode="6920001").all()),
+        Decimal(0))
     g = tmp_path / "gifts.xlsx"
     _gifts_xlsx(g, [["1", "R001", "6920001", "2", "低温奶"]])
     with open(g, "rb") as f:
@@ -687,6 +693,21 @@ def test_confirm_gift_deduction(tmp_path, client, db_session):
     r = client.post("/months/2026-06/gift-deduction/confirm", headers=h, json={"anomaly_id": anom.id})
     assert r.status_code == 200
     assert r.json()["deduct_qty"] == 1  # min(销售1, 赠送2)
+    assert r.json()["deduct_amt"] > 0     # I3：扣除额必须为正
     gd = db_session.query(GiftDeduction).filter_by(month="2026-06").one()
     assert gd.deduct_qty == 1
-    assert anom.status == "resolved" or db_session.get(Anomaly, anom.id).status == "resolved"
+    # I3：显式 expire_all 后重查 anomaly 状态（替代原弱断言）
+    db_session.expire_all()
+    assert db_session.get(Anomaly, anom.id).status == "resolved"
+    # I3：确认后必须把月份标 stale，提示前端重算
+    assert db_session.get(Month, "2026-06").results_stale is True
+
+    # I2：端到端——确认后重算，该组应出现 tag=="赠送扣除" 的行且金额缩减
+    rc = client.post("/months/2026-06/compute", headers=h)
+    assert rc.status_code == 200, rc.text
+    deducted = db_session.query(DetailRow).filter_by(
+        month="2026-06", barcode="6920001", tag="赠送扣除").all()
+    assert deducted, "重算后该组应出现 tag==赠送扣除 的明细行"
+    deducted_total = sum((d.amount for d in deducted), Decimal(0))
+    assert deducted_total < orig_group_total, (
+        f"赠送扣除后组金额应缩减: {deducted_total} !< 原始 {orig_group_total}")

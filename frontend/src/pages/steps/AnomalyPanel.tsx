@@ -267,7 +267,7 @@ export default function AnomalyPanel({ month, onResolved }: AnomalyPanelProps) {
   const handleConfirmDeduct = async (item: Anomaly) => {
     try {
       const r = await workflowApiExtended.confirmGiftDeduction(month, item.id);
-      toast.success(`已确认扣除 ${r.deduct_qty} 件`);
+      toast.success(`已确认扣除 ${r.deduct_qty} 件，扣除额 ${r.deduct_amt} 元`);
       load();
       onResolved();
     } catch {
