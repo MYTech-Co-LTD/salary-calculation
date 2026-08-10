@@ -119,6 +119,8 @@ class AnomalyChecker:
         for key, gift_q in gift_qty_map.items():
             if key in confirmed_keys:
                 continue
+            if gift_q <= 0:
+                continue   # 退货赠送（负数件）不进 type7——走现有 gift_keys 剔除逻辑
             sales_q = sales_qty_map.get(key, Decimal(0))
             if sales_q == gift_q:
                 continue

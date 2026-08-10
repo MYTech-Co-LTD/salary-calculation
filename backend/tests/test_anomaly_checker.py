@@ -31,3 +31,12 @@ def test_gift_qty_mismatch_skips_equal(db_session):
     c.check_gift_qty_mismatch({("R1", "b"): Decimal(1)}, {("R1", "b"): Decimal(1)},
                               set(), {("R1", "b"): "n"})
     assert c.get_anomalies() == []
+
+
+def test_gift_qty_mismatch_skips_return_gift(db_session):
+    # 退货赠送（让利明细登记负数件）→ sales_qty_map 为 0（销售流水只有退货行被过滤）
+    # 此类不进 type7（走现有 gift_keys 剔除逻辑），避免 0 != -1 误报
+    c = _checker(db_session)
+    c.check_gift_qty_mismatch({("R1", "b"): Decimal(0)}, {("R1", "b"): Decimal(-1)},
+                              set(), {("R1", "b"): "n"})
+    assert c.get_anomalies() == []
