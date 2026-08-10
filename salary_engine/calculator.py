@@ -46,13 +46,17 @@ class ComputeResult:
 
 
 def compute(sales_lines, products, stores, targets, rate_table,
-            month: str, days: int, gift_keys=None, duty_override=None, excluded_stores=None):
+            month: str, days: int, gift_keys=None, duty_override=None,
+            excluded_stores=None, gift_deduction=None):
     """主流程。返回 ComputeResult。
 
-    - gift_keys: {(订单号, 条码)} 赠送集合，命中的销售行剔除。
+    - gift_keys: {(订单号, 条码)} 赠送集合，命中的销售行整组剔除。
+    - gift_deduction: {(订单号, 条码): deduct_qty} 已确认按件数扣除的组；
+      命中且在此的组不整组剔，按 1−deduct_qty/组总qty 均摊，剩余计提成（ADR-023）。
     - duty_override: {(store,date): salesperson} 人工确认当班；为 None 则自动推断。
     """
     gift_keys = gift_keys or set()
+    gift_deduction = gift_deduction or {}
     warnings = []
     missing_target_stores = set()
 
@@ -64,7 +68,8 @@ def compute(sales_lines, products, stores, targets, rate_table,
         ln = replace(ln, store=clean_store(ln.store))  # 仅改门店名，保留其余字段
         if ln.store in excluded_stores:            # 不计考核店（ADR-017）
             excluded.append((ln, "不计考核")); continue
-        if (ln.receipt, ln.barcode) in gift_keys:
+        key = (ln.receipt, ln.barcode)
+        if key in gift_keys and key not in gift_deduction:
             excluded.append((ln, "赠送剔除")); continue
         product = products.get(ln.barcode)
         if product is None or product.category is None:
@@ -81,6 +86,17 @@ def compute(sales_lines, products, stores, targets, rate_table,
     for s in sales:
         groups[(s.receipt, s.barcode)]["sales"].append(s)
 
+    # 已确认按件数扣除的组：算剩余系数（均摊口径，ADR-023）
+    deduct_factors = {}  # (receipt,barcode) -> Decimal 剩余比例
+    for dkey, deduct_qty in gift_deduction.items():
+        g = groups.get(dkey)
+        if not g or not g["sales"]:
+            continue
+        total_qty = sum((s.qty for s in g["sales"]), Decimal(0))
+        if total_qty == 0:
+            continue
+        deduct_factors[dkey] = Decimal(1) - (Decimal(str(deduct_qty)) / total_qty)
+
     # 3) 当班表（用已清洗门店名的线下销售推断；人工 override 由 Web 提供）
     duty = duty_override if duty_override is not None else infer_duty(sales)
 
@@ -93,7 +109,9 @@ def compute(sales_lines, products, stores, targets, rate_table,
         if not g["sales"]:
             continue
         s0 = g["sales"][0]
-        daily_sales[(s0.store, s0.sale_date)] += group_net(g)
+        net = group_net(g)
+        factor = deduct_factors.get((s0.receipt, s0.barcode), Decimal(1))
+        daily_sales[(s0.store, s0.sale_date)] += net * factor
     for r in returns:
         daily_sales[(r.store, r.sale_date)] += r.amount  # 负数
 
@@ -143,15 +161,18 @@ def compute(sales_lines, products, stores, targets, rate_table,
             continue
         sp = _resolve_duty(duty, s0.store, s0.sale_date, s0.salesperson)
         bucket = ps_bucket.get((sp, s0.store), "LT_70")
+        factor = deduct_factors.get((s0.receipt, s0.barcode), Decimal(1))
+        row_tag = "赠送扣除" if factor != Decimal(1) else "有效计提"
         # 逐行：销售（每行按自己的 unit_price 算 tier/rate）
         for s in g["sales"]:
             margin = gross_margin(s.unit_price, product.cost)
             tier = classify_tier(product.category, margin)
             rate = lookup_rate(rate_table, store_obj.store_class, bucket, tier)
-            commission = s.amount * rate
+            amt = s.amount * factor
+            commission = amt * rate
             details.append(DetailRow(s.store, s.sale_date, sp, s.barcode, s.product_name,
-                                     tier, store_obj.store_class, bucket, rate, s.amount,
-                                     commission, tag="有效计提",
+                                     tier, store_obj.store_class, bucket, rate, amt,
+                                     commission, tag=row_tag,
                                      sales_record_id=getattr(s, "sales_record_id", None)))
             comm_person[sp] += commission
             comm_store[s.store] += commission

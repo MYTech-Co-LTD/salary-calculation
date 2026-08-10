@@ -227,3 +227,36 @@ def test_c2_per_line_tier_for_same_receipt_different_price():
     assert by_price[Decimal("5.5")].tier == "特价"
     assert by_price[Decimal("5.5")].rate == Decimal("0.01")
     assert by_price[Decimal("5.5")].commission == Decimal("0.055")
+
+
+def _gift_sales(receipt, n, amt):
+    """造 n 行同 (receipt,barcode) 的销售，每行 qty1/amount=amt。"""
+    return [SalesLine(receipt, None, "福景店", date(2026, 6, 1), "6920001", "低温奶",
+                      Decimal(1), Decimal(amt), Decimal(amt),
+                      is_return=False, is_online=False, salesperson="高睿") for _ in range(n)]
+
+
+def test_gift_deduction_partial(products, stores):
+    # 买2送1：3 行不对，这里造 2 行各 amt5=总10；gift_deduction 扣1 → factor 0.5 → 计提成金额5
+    target = {"福景店": Decimal("100")}
+    sales = _gift_sales("R1", 2, 5)
+    gifts = {("R1", "6920001")}
+    gd = {("R1", "6920001"): Decimal(1)}
+    r = compute(sales, products, stores, target, seed_rate_table(),
+                month="2026-06", days=30, gift_keys=gifts, gift_deduction=gd)
+    deducted = [d for d in r.details if d.tag == "赠送扣除"]
+    assert len(deducted) == 2
+    assert sum((d.amount for d in deducted), Decimal(0)) == Decimal("5")  # 10 × 0.5
+
+
+def test_gift_deduction_all_deducted_when_sales_less(products, stores):
+    # 销售1件、扣 min(1,..)=1 → factor 0 → 全扣，金额0
+    target = {"福景店": Decimal("100")}
+    sales = _gift_sales("R1", 1, 5)
+    gifts = {("R1", "6920001")}
+    gd = {("R1", "6920001"): Decimal(1)}
+    r = compute(sales, products, stores, target, seed_rate_table(),
+                month="2026-06", days=30, gift_keys=gifts, gift_deduction=gd)
+    deducted = [d for d in r.details if d.tag == "赠送扣除"]
+    assert len(deducted) == 1
+    assert deducted[0].amount == Decimal(0)
