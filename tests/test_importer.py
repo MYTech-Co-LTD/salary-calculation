@@ -68,3 +68,24 @@ def test_load_stores_tolerates_spaced_header():
     stores, targets = load_stores_from_rows(rows)
     assert "福景店" in stores
     assert targets["福景店"] == Decimal("84000")
+
+
+from salary_engine.importer import load_gift_qty_map_from_rows
+
+
+def test_load_gift_qty_map_aggregates_same_key():
+    rows = [
+        ["序号", "订单号/小票单号", "国际条码", "数量"],
+        ["1", "R001", "6920001", "2"],
+        ["2", "R001", "6920001", "1"],   # 同 key 聚合 → 3
+        ["3", "R002", "6920002", "1"],
+    ]
+    qm = load_gift_qty_map_from_rows(rows)
+    assert qm[("R001", "6920001")] == Decimal(3)
+    assert qm[("R002", "6920002")] == Decimal(1)
+
+
+def test_load_gift_qty_map_missing_qty_col_defaults_one():
+    rows = [["订单号", "国际条码"], ["R001", "6920001"]]
+    qm = load_gift_qty_map_from_rows(rows)
+    assert qm[("R001", "6920001")] == Decimal(1)

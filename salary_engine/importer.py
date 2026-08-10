@@ -168,3 +168,24 @@ def load_sales_xlsx(path):
 
 def load_gift_keys_xlsx(path):
     return load_gift_keys_from_rows(_xlsx_rows(path))
+
+
+def load_gift_qty_map_from_rows(rows):
+    """让利明细 → {(订单号, 国际条码): 数量(带符号)}。
+    同 key 多行聚加；缺『数量』列时每行按 1 计（容错）。"""
+    ii, h = _find_header(rows, "订单号", "国际条码")
+    idx = {_norm(c): k for k, c in enumerate(h) if c is not None}
+    o, b = _col(idx, "订单号"), _col(idx, "国际条码")
+    q_i = idx.get(_norm("数量"))  # 数量列可能缺失 → None
+    qm: dict[tuple[str, str], Decimal] = {}
+    for r in rows[ii + 1:]:
+        if not r or len(r) <= o or r[o] in (None, ""):
+            continue
+        key = (str(r[o]), str(r[b]))
+        qty = _D(r[q_i]) if (q_i is not None and q_i < len(r)) else Decimal(1)
+        qm[key] = qm.get(key, Decimal(0)) + qty
+    return qm
+
+
+def load_gift_qty_map_xlsx(path):
+    return load_gift_qty_map_from_rows(_xlsx_rows(path))
