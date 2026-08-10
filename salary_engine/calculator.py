@@ -32,7 +32,7 @@ class DetailRow:
     rate: Decimal
     amount: Decimal
     commission: Decimal
-    tag: str = "有效计提"          # 有效计提/退货/赠送剔除/不计提成/非乳品/不计考核(ADR-017/019)
+    tag: str = "有效计提"          # 有效计提/退货/赠送剔除/赠送扣除/不计提成/非乳品/不计考核(ADR-017/019/023)
     sales_record_id: int = None
 
 
@@ -87,6 +87,9 @@ def compute(sales_lines, products, stores, targets, rate_table,
         groups[(s.receipt, s.barcode)]["sales"].append(s)
 
     # 已确认按件数扣除的组：算剩余系数（均摊口径，ADR-023）
+    # clamp 到 0：confirm 端点的 sales_q（SalesRecord 全量非退货）≠ 本函数 total_qty
+    # （步骤1 已剔除非乳品/不计考核店），同组有行被剔时 deduct_qty 可能 > total_qty →
+    # factor 为负 → 负提成。max(0, …) 把该组判为全扣（金额 0），不出负值。
     deduct_factors = {}  # (receipt,barcode) -> Decimal 剩余比例
     for dkey, deduct_qty in gift_deduction.items():
         g = groups.get(dkey)
@@ -95,7 +98,7 @@ def compute(sales_lines, products, stores, targets, rate_table,
         total_qty = sum((s.qty for s in g["sales"]), Decimal(0))
         if total_qty == 0:
             continue
-        deduct_factors[dkey] = Decimal(1) - (Decimal(str(deduct_qty)) / total_qty)
+        deduct_factors[dkey] = max(Decimal(0), Decimal(1) - (Decimal(str(deduct_qty)) / total_qty))
 
     # 3) 当班表（用已清洗门店名的线下销售推断；人工 override 由 Web 提供）
     duty = duty_override if duty_override is not None else infer_duty(sales)

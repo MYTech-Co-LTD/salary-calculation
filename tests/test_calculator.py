@@ -260,3 +260,30 @@ def test_gift_deduction_all_deducted_when_sales_less(products, stores):
     deducted = [d for d in r.details if d.tag == "赠送扣除"]
     assert len(deducted) == 1
     assert deducted[0].amount == Decimal(0)
+
+
+def test_gift_deduction_clamps_factor_when_deduct_exceeds_total(products, stores):
+    """I1 正确性：deduct_qty > 组进入聚合的 total_qty 时 factor 必须 clamp 到 0，
+    不出负提成。
+
+    根因：confirm 端点的 sales_q（SalesRecord 全量非退货）≠ calculator 的 total_qty
+    （步骤1 过滤后已剔除非乳品/不计考核店）；同组有行被剔时 deduct_qty 可能 > total_qty。
+    无 clamp 时 factor = 1 - 3/1 = -2 → 行 amount = 5 × -2 = -10 → 负提成。
+    有 clamp 时 factor = max(0, -2) = 0 → 该组判为全扣（金额 0），不出负值。
+    """
+    target = {"福景店": Decimal("100")}
+    # 组 (R1, 6920001) 进入聚合的总 qty = 1（仅 1 行销售）
+    sales = _gift_sales("R1", 1, 5)
+    gifts = {("R1", "6920001")}
+    # deduct_qty=3 > total_qty=1：模拟 confirm 端点用未过滤全量 sales_q 得到的扣减量
+    gd = {("R1", "6920001"): Decimal(3)}
+    r = compute(sales, products, stores, target, seed_rate_table(),
+                month="2026-06", days=30, gift_keys=gifts, gift_deduction=gd)
+    deducted = [d for d in r.details if d.tag == "赠送扣除"]
+    assert len(deducted) == 1
+    # factor clamp 到 0 → 行 amount 不为负（== 0）
+    assert deducted[0].amount >= Decimal(0), f"factor 未 clamp，出负值: {deducted[0].amount}"
+    assert deducted[0].amount == Decimal(0)
+    assert deducted[0].commission >= Decimal(0), f"出负提成: {deducted[0].commission}"
+    # 整组不出负提成
+    assert r.commission_by_person.get("高睿", Decimal(0)) >= Decimal(0)
