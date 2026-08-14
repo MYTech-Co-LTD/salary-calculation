@@ -256,8 +256,8 @@ export const workflowApiExtended = {
     http.post<{ deduct_qty: number; deduct_amt: number }>(
       `/months/${month}/gift-deduction/confirm`, { anomaly_id: anomalyId }).then(r => r.data),
   // —— OBS 中转上传（ADR-024）——
-  getUploadTicket: (month: string, kind: "sales" | "gifts") =>
-    http.post<{ url: string; key: string }>(`/months/${month}/upload-ticket`, { kind }).then(r => r.data),
+  getUploadTicket: (month: string, kind: "sales" | "gifts", ext: string) =>
+    http.post<{ url: string; key: string }>(`/months/${month}/upload-ticket`, { kind, ext }).then(r => r.data),
   importFromOss: (month: string, kind: "sales" | "gifts", key: string) =>
     http.post(`/months/${month}/import-oss`, { kind, key }).then(r => r.data),
 };

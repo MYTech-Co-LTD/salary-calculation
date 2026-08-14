@@ -50,6 +50,8 @@ function DropZone({
           onChange={(e) => {
             const f = e.target.files?.[0];
             if (f) onUpload(f);
+            // 重置 value：失败后重选同一文件也能触发 onChange
+            e.target.value = "";
           }}
         />
       </label>
@@ -102,15 +104,25 @@ export default function ImportStep({ month }: { month: string }) {
 
   async function upload(kind: "sales" | "gifts", file: File) {
     setUploading({ kind, progress: 0 });
+    // 扩展名取自真实文件名并小写，贯穿到 OBS key 与本地落盘（.xls 不再存成 .xlsx）
+    const dot = file.name.lastIndexOf(".");
+    const ext = dot >= 0 ? file.name.slice(dot).toLowerCase() : ".xlsx";
     let ticket: { url: string; key: string };
     try {
-      ticket = await workflowApiExtended.getUploadTicket(month, kind);
+      ticket = await workflowApiExtended.getUploadTicket(month, kind, ext);
     } catch {
       // OBS 通道不可用（未配置/网络）→ 回退旧 multipart 直传
       return legacyUpload(kind, file);
     }
+    // PUT 直传与 import-oss 分开 try/catch：两阶段失败文案不同（spec 口径）
     try {
       await putFileToOss(ticket.url, file, (p) => setUploading({ kind, progress: p }));
+    } catch {
+      setUploading(null);
+      toast.error("上传到对象存储失败，请重试");
+      return;
+    }
+    try {
       await workflowApiExtended.importFromOss(month, kind, ticket.key);
       markDone(kind);
     } catch (e: any) {
