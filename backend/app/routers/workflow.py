@@ -88,6 +88,7 @@ def import_gifts(month: str, file: UploadFile = File(...),
 
 class UploadTicketReq(BaseModel):
     kind: str  # "sales" | "gifts"
+    ext: str   # 真实文件后缀 ".xlsx" | ".xls"，贯穿到 OBS key 与本地落盘
 
 
 class ImportOssReq(BaseModel):
@@ -103,10 +104,13 @@ def upload_ticket(month: str, body: UploadTicketReq,
     if body.kind not in ("sales", "gifts"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "kind 必须是 sales 或 gifts")
     from backend.app.services import oss_upload
+    if body.ext not in oss_upload.ALLOWED_EXTS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "ext 必须是 .xlsx 或 .xls")
     if not oss_upload.is_configured():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
                             "对象存储未配置，请直传")
-    key = oss_upload.upload_key(month, body.kind)
+    key = oss_upload.upload_key(month, body.kind, body.ext)
     return {"url": oss_upload.presign_put(key), "key": key}
 
 
@@ -123,7 +127,10 @@ def import_oss(month: str, body: ImportOssReq,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "非法的上传 key")
     d = UPLOAD_DIR / month
     d.mkdir(parents=True, exist_ok=True)
-    path = str(d / f"{body.kind}.xlsx")
+    # 后缀以签发到 key 里的为准（key_matches 已保证是 .xlsx/.xls），
+    # 请求体不重复带 ext，避免两处不一致
+    suffix = os.path.splitext(body.key)[1]
+    path = str(d / f"{body.kind}{suffix}")
     try:
         oss_upload.fetch_to_file(body.key, path)
     except Exception as e:
@@ -137,7 +144,6 @@ def import_oss(month: str, body: ImportOssReq,
 
 from datetime import date as date_type
 from dataclasses import replace
-from pydantic import BaseModel
 from salary_engine.importer import load_sales_xlsx
 from salary_engine.calculator import clean_store
 from salary_engine.onduty import infer_duty

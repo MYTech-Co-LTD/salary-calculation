@@ -727,7 +727,8 @@ def test_upload_ticket_requires_oss(client, monkeypatch):
     client.post("/months", headers=h, json={"month": "2026-06"})
     from backend.app.services import oss_upload
     monkeypatch.setattr(oss_upload, "is_configured", lambda: False)
-    r = client.post("/months/2026-06/upload-ticket", headers=h, json={"kind": "sales"})
+    r = client.post("/months/2026-06/upload-ticket", headers=h,
+                    json={"kind": "sales", "ext": ".xlsx"})
     assert r.status_code == 503
 
 
@@ -737,14 +738,22 @@ def test_upload_ticket_returns_url_and_key(client, monkeypatch):
     from backend.app.services import oss_upload
     monkeypatch.setattr(oss_upload, "is_configured", lambda: True)
     monkeypatch.setattr(oss_upload, "presign_put", lambda key, expires=600: f"https://fake/{key}")
-    r = client.post("/months/2026-06/upload-ticket", headers=h, json={"kind": "sales"})
+    # ext 贯穿到 key：.xls 请求签出 .xls key
+    r = client.post("/months/2026-06/upload-ticket", headers=h,
+                    json={"kind": "sales", "ext": ".xls"})
     assert r.status_code == 200
     body = r.json()
     assert body["url"] == f"https://fake/{body['key']}"
     assert oss_upload.key_matches(body["key"], "2026-06", "sales")
-    # kind 非法 → 400
-    r2 = client.post("/months/2026-06/upload-ticket", headers=h, json={"kind": "other"})
+    assert body["key"].endswith(".xls")
+    # kind / ext 非法 → 400
+    r2 = client.post("/months/2026-06/upload-ticket", headers=h,
+                     json={"kind": "other", "ext": ".xlsx"})
     assert r2.status_code == 400
+    for bad_ext in (".xlsm", "xlsx", ".XLSX"):
+        r3 = client.post("/months/2026-06/upload-ticket", headers=h,
+                         json={"kind": "sales", "ext": bad_ext})
+        assert r3.status_code == 400, bad_ext
 
 
 def test_import_oss_rejects_bad_key(client, monkeypatch, tmp_path):
@@ -754,9 +763,10 @@ def test_import_oss_rejects_bad_key(client, monkeypatch, tmp_path):
     fetched = []
     monkeypatch.setattr(oss_upload, "fetch_to_file",
                         lambda key, path: fetched.append(key))
-    # 非 32hex 的 key / 跨月 key / 桶内其他对象 → 400 且不触发拉取
+    # 非 32hex 的 key / 跨月 key / 非 xlsx-xls 后缀 / 桶内其他对象 → 400 且不触发拉取
     for key in ("salary/uploads/2026-06/sales-not-a-uuid.xlsx",
                 "salary/uploads/2026-07/sales-" + "0" * 32 + ".xlsx",
+                "salary/uploads/2026-06/sales-" + "0" * 32 + ".xlsm",
                 "salary/v3/2026-06.xlsx"):
         r = client.post("/months/2026-06/import-oss", headers=h,
                         json={"kind": "sales", "key": key})
@@ -775,7 +785,7 @@ def test_import_oss_sales_full_path(client, monkeypatch, tmp_path, db_session):
         import shutil; shutil.copy(s, path)
     monkeypatch.setattr(oss_upload, "fetch_to_file", _fake_fetch)
 
-    key = oss_upload.upload_key("2026-06", "sales")
+    key = oss_upload.upload_key("2026-06", "sales", ".xlsx")
     r = client.post("/months/2026-06/import-oss", headers=h,
                     json={"kind": "sales", "key": key})
     assert r.status_code == 200
@@ -787,3 +797,30 @@ def test_import_oss_sales_full_path(client, monkeypatch, tmp_path, db_session):
     assert db_session.query(SalesRecord).filter_by(month="2026-06").count() == 1
     # results_stale 语义不在此重复断言：新端点与旧 multipart 走同一 _apply_sales_import，
     # stale 已由 test_input_changes_mark_month_stale 覆盖。
+
+
+def test_import_oss_xls_key_lands_as_xls(client, monkeypatch, tmp_path):
+    """.xls key 的落盘后缀随 key：不再硬编码 .xlsx（真 BIFF .xls 存成 .xlsx 必解析失败）。
+    导入解析层依赖真实文件格式，此处只断言落盘路径——解析行为由 importer 测试覆盖。"""
+    h = auth_header(client)
+    client.post("/months", headers=h, json={"month": "2026-06"})
+
+    from backend.app.services import oss_upload
+    landed = []
+    monkeypatch.setattr(oss_upload, "fetch_to_file",
+                        lambda key, path: (landed.append(path),
+                                           open(path, "wb").write(b"BIFF")))
+    import backend.app.routers.workflow as wf
+    applied = {}
+
+    def _fake_apply(db, m, path):
+        applied["path"] = path
+        return {}
+    monkeypatch.setattr(wf, "_apply_sales_import", _fake_apply)
+
+    key = oss_upload.upload_key("2026-06", "sales", ".xls")
+    r = client.post("/months/2026-06/import-oss", headers=h,
+                    json={"kind": "sales", "key": key})
+    assert r.status_code == 200, r.text
+    assert applied["path"].endswith("/sales.xls"), applied["path"]
+    assert landed == [applied["path"]]
