@@ -255,4 +255,23 @@ export const workflowApiExtended = {
   confirmGiftDeduction: (month: string, anomalyId: number) =>
     http.post<{ deduct_qty: number; deduct_amt: number }>(
       `/months/${month}/gift-deduction/confirm`, { anomaly_id: anomalyId }).then(r => r.data),
+  // —— OBS 中转上传（ADR-024）——
+  getUploadTicket: (month: string, kind: "sales" | "gifts") =>
+    http.post<{ url: string; key: string }>(`/months/${month}/upload-ticket`, { kind }).then(r => r.data),
+  importFromOss: (month: string, kind: "sales" | "gifts", key: string) =>
+    http.post(`/months/${month}/import-oss`, { kind, key }).then(r => r.data),
 };
+
+/** XHR PUT 直传 OBS（fetch 无上传进度故用 XHR）。 */
+export function putFileToOss(url: string, file: File, onProgress?: (pct: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    };
+    xhr.onload = () => (xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`PUT ${xhr.status}`)));
+    xhr.onerror = () => reject(new Error("网络错误"));
+    xhr.send(file);
+  });
+}
