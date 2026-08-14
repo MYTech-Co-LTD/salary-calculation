@@ -711,3 +711,79 @@ def test_confirm_gift_deduction(tmp_path, client, db_session):
     deducted_total = sum((d.amount for d in deducted), Decimal(0))
     assert deducted_total < orig_group_total, (
         f"赠送扣除后组金额应缩减: {deducted_total} !< 原始 {orig_group_total}")
+
+
+def _mk_month_with_sales(tmp_path, client, h):
+    client.post("/months", headers=h, json={"month": "2026-06"})
+    s = tmp_path / "sales.xlsx"; _sales_xlsx(s)
+    with open(s, "rb") as f:
+        client.post("/months/2026-06/import-sales", headers=h,
+                    files={"file": ("sales.xlsx", f)})
+
+
+def test_upload_ticket_requires_oss(client, monkeypatch):
+    """未配 OSS → 503（前端据此回退 multipart）"""
+    h = auth_header(client)
+    client.post("/months", headers=h, json={"month": "2026-06"})
+    from backend.app.services import oss_upload
+    monkeypatch.setattr(oss_upload, "is_configured", lambda: False)
+    r = client.post("/months/2026-06/upload-ticket", headers=h, json={"kind": "sales"})
+    assert r.status_code == 503
+
+
+def test_upload_ticket_returns_url_and_key(client, monkeypatch):
+    h = auth_header(client)
+    client.post("/months", headers=h, json={"month": "2026-06"})
+    from backend.app.services import oss_upload
+    monkeypatch.setattr(oss_upload, "is_configured", lambda: True)
+    monkeypatch.setattr(oss_upload, "presign_put", lambda key, expires=600: f"https://fake/{key}")
+    r = client.post("/months/2026-06/upload-ticket", headers=h, json={"kind": "sales"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["url"] == f"https://fake/{body['key']}"
+    assert oss_upload.key_matches(body["key"], "2026-06", "sales")
+    # kind 非法 → 400
+    r2 = client.post("/months/2026-06/upload-ticket", headers=h, json={"kind": "other"})
+    assert r2.status_code == 400
+
+
+def test_import_oss_rejects_bad_key(client, monkeypatch, tmp_path):
+    h = auth_header(client)
+    client.post("/months", headers=h, json={"month": "2026-06"})
+    from backend.app.services import oss_upload
+    fetched = []
+    monkeypatch.setattr(oss_upload, "fetch_to_file",
+                        lambda key, path: fetched.append(key))
+    # 非 32hex 的 key / 跨月 key / 桶内其他对象 → 400 且不触发拉取
+    for key in ("salary/uploads/2026-06/sales-not-a-uuid.xlsx",
+                "salary/uploads/2026-07/sales-" + "0" * 32 + ".xlsx",
+                "salary/v3/2026-06.xlsx"):
+        r = client.post("/months/2026-06/import-oss", headers=h,
+                        json={"kind": "sales", "key": key})
+        assert r.status_code == 400, key
+    assert fetched == []
+
+
+def test_import_oss_sales_full_path(client, monkeypatch, tmp_path, db_session):
+    """import-oss 成功路径：内网拉回 → 行为与旧 multipart 导入等同"""
+    h = auth_header(client)
+    client.post("/months", headers=h, json={"month": "2026-06"})
+    s = tmp_path / "via_oss.xlsx"; _sales_xlsx(s)
+
+    from backend.app.services import oss_upload
+    def _fake_fetch(key, path):
+        import shutil; shutil.copy(s, path)
+    monkeypatch.setattr(oss_upload, "fetch_to_file", _fake_fetch)
+
+    key = oss_upload.upload_key("2026-06", "sales")
+    r = client.post("/months/2026-06/import-oss", headers=h,
+                    json={"kind": "sales", "key": key})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1 and body["db_count"] == 1
+    m = client.get("/months/2026-06", headers=h).json()
+    assert m["sales_file"] and m["sales_file"].endswith(".xlsx")
+    from backend.app.db import SalesRecord
+    assert db_session.query(SalesRecord).filter_by(month="2026-06").count() == 1
+    # results_stale 语义不在此重复断言：新端点与旧 multipart 走同一 _apply_sales_import，
+    # stale 已由 test_input_changes_mark_month_stale 覆盖。

@@ -2,6 +2,7 @@ import os
 import threading
 from typing import Any, Dict
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from backend.app.auth import current_user
@@ -29,19 +30,16 @@ def _get_month(db, month) -> Month:
     return m
 
 
-@router.post("/months/{month}/import-sales")
-def import_sales(month: str, file: UploadFile = File(...),
-                 _: User = Depends(current_user), db: Session = Depends(get_db)):
-    m = _get_month(db, month)
-    m.sales_file = _save_upload(month, file, "sales")
+def _apply_sales_import(db, m: Month, path: str) -> dict:
+    """销售文件已落盘后的公共导入逻辑（multipart 与 OBS 中转共用，ADR-024）。"""
+    m.sales_file = path
     m.results_stale = True
     db.commit()
 
-    # 同时导入到数据库并打标签
     from backend.app.services.sales_importer import import_sales_to_db
     from salary_engine.importer import load_sales_xlsx, load_gift_keys_xlsx
 
-    sales = load_sales_xlsx(m.sales_file)
+    sales = load_sales_xlsx(path)
     gift_keys = set()
     if m.gifts_file:
         try:
@@ -49,19 +47,15 @@ def import_sales(month: str, file: UploadFile = File(...),
         except Exception as e:
             print(f"Warning: Failed to load gift keys: {e}")
 
-    result = import_sales_to_db(db, month, sales, gift_keys)
-    return {"sales_file": m.sales_file, **result}
+    return import_sales_to_db(db, m.month, sales, gift_keys)
 
 
-@router.post("/months/{month}/import-gifts")
-def import_gifts(month: str, file: UploadFile = File(...),
-                 _: User = Depends(current_user), db: Session = Depends(get_db)):
-    m = _get_month(db, month)
-    m.gifts_file = _save_upload(month, file, "gifts")
+def _apply_gifts_import(db, m: Month, path: str) -> None:
+    """让利文件已落盘后的公共导入逻辑（multipart 与 OBS 中转共用，ADR-024）。"""
+    m.gifts_file = path
     m.results_stale = True
     db.commit()
 
-    # 如果已有销售数据，重新打标签
     if m.sales_file:
         from backend.app.services.sales_importer import import_sales_to_db
         from salary_engine.importer import load_sales_xlsx, load_gift_keys_xlsx
@@ -69,12 +63,75 @@ def import_gifts(month: str, file: UploadFile = File(...),
         sales = load_sales_xlsx(m.sales_file)
         gift_keys = set()
         try:
-            gift_keys = load_gift_keys_xlsx(m.gifts_file)
+            gift_keys = load_gift_keys_xlsx(path)
         except Exception as e:
             print(f"Warning: Failed to load gift keys: {e}")
 
-        import_sales_to_db(db, month, sales, gift_keys)
+        import_sales_to_db(db, m.month, sales, gift_keys)
 
+
+@router.post("/months/{month}/import-sales")
+def import_sales(month: str, file: UploadFile = File(...),
+                 _: User = Depends(current_user), db: Session = Depends(get_db)):
+    m = _get_month(db, month)
+    result = _apply_sales_import(db, m, _save_upload(month, file, "sales"))
+    return {"sales_file": m.sales_file, **result}
+
+
+@router.post("/months/{month}/import-gifts")
+def import_gifts(month: str, file: UploadFile = File(...),
+                 _: User = Depends(current_user), db: Session = Depends(get_db)):
+    m = _get_month(db, month)
+    _apply_gifts_import(db, m, _save_upload(month, file, "gifts"))
+    return {"gifts_file": m.gifts_file}
+
+
+class UploadTicketReq(BaseModel):
+    kind: str  # "sales" | "gifts"
+
+
+class ImportOssReq(BaseModel):
+    kind: str
+    key: str
+
+
+@router.post("/months/{month}/upload-ticket")
+def upload_ticket(month: str, body: UploadTicketReq,
+                  _: User = Depends(current_user), db: Session = Depends(get_db)):
+    """签发 OBS 预签名直传 ticket（ADR-024）。未配 OBS → 503，前端回退 multipart。"""
+    _get_month(db, month)
+    if body.kind not in ("sales", "gifts"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "kind 必须是 sales 或 gifts")
+    from backend.app.services import oss_upload
+    if not oss_upload.is_configured():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE,
+                            "对象存储未配置，请直传")
+    key = oss_upload.upload_key(month, body.kind)
+    return {"url": oss_upload.presign_put(key), "key": key}
+
+
+@router.post("/months/{month}/import-oss")
+def import_oss(month: str, body: ImportOssReq,
+               _: User = Depends(current_user), db: Session = Depends(get_db)):
+    """OBS 中转导入：内网拉回文件 → 复用与 multipart 相同的导入逻辑（ADR-024）。"""
+    m = _get_month(db, month)
+    if body.kind not in ("sales", "gifts"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "kind 必须是 sales 或 gifts")
+    from backend.app.services import oss_upload
+    # key 必须是本服务签发的当月当类型 key——防借端点拉桶内任意对象
+    if not oss_upload.key_matches(body.key, month, body.kind):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "非法的上传 key")
+    d = UPLOAD_DIR / month
+    d.mkdir(parents=True, exist_ok=True)
+    path = str(d / f"{body.kind}.xlsx")
+    try:
+        oss_upload.fetch_to_file(body.key, path)
+    except Exception as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"从对象存储拉取失败，请重新上传: {e}")
+    if body.kind == "sales":
+        result = _apply_sales_import(db, m, path)
+        return {"sales_file": m.sales_file, **result}
+    _apply_gifts_import(db, m, path)
     return {"gifts_file": m.gifts_file}
 
 
