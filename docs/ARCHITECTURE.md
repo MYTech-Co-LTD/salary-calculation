@@ -2,7 +2,7 @@
 
 > 本文件是项目架构决策的**权威记录**，记录每个已确认架构决策的**决策过程**（背景 / 备选 / 理由 / 影响），遵守 `CLAUDE.md` 铁律 3、4。详细设计见 `docs/superpowers/specs/`；本文只锁"是什么 + 为什么"。
 
-- 最近更新：2026-08-10（ADR-023 赠送件数不符异常 + 确认按件数扣除）
+- 最近更新：2026-08-14（ADR-024 导入提速：去重直插 + OBS 中转上传）
 - 状态图例：✅ 已确认（锁定） · 📋 已规划后续
 - **本轮（计算数据流重构）架构已全部确认**（2026-07-19），可进入 writing-plans。
 
@@ -247,6 +247,25 @@
   - `db.py` 注释 1-6 → 1-7；`test_workflow.py:392` known_tags 加"赠送扣除"。
   - 不让利明细整体落库；不弹窗输入件数；不给 SalesRecord 加列；不改 importer。
 - **决策过程**：用户问"同小票买多件只送1件怎么处理"（2026-08-10）→ 6 月数据验证 0 案例 → 用户先选"加异常不改计算"，再明确为"进异常排查 + 确认扣除 + 打标签 + 注明原因和处理情况" → 金额口径选"按件数均摊"、件数口径选"默认扣 min(赠送,销售) 一键确认"。**实现后 T9 真实 6 月数据验证发现退货赠送（gift_qty 负数）被误报 type7（4 个），用户裁定豁免 gift_qty≤0（2026-08-10）**。spec：`docs/superpowers/specs/2026-08-10-gift-qty-mismatch-design.md`
+
+## ADR-024 导入提速：内存去重直插 + OBS 中转上传 ✅
+
+- **决策**：销售流水导入（7 月 28MB、10.2 万行，全程 60-90s）两项优化：
+  1. **落库提速（纯性能优化，不改数据流）**：`import_sales_to_db` 弃 `on_conflict_do_update` upsert，改为**内存 dict 去重（同文件重复行后写覆盖前写）+ Core `insert` 批插**。唯一键与现有 on_conflict `index_elements` 完全一致（month/receipt/store/sale_date/barcode/amount），语义零变化。实测 42s → 8.2s。
+  2. **上传走 OBS 中转（数据流变化）**：前端先向后端要**预签名 PUT URL**（需登录）→ 浏览器**直传 OBS 公网 endpoint** → 前端通知后端 → 后端从**内网 endpoint** 拉回文件落 uploads 目录 → 复用现有解析/落库逻辑。**未配 OBS 时前端回退 multipart 直传**（旧端点保留，兼容本地开发）。
+- **背景**：实测分解（2026-08-14，生产容器 + 临时库基准）：网络传输 15-30s / Excel 解析 5.8s / **SQLite 落库 42-47s（大头）**。落库慢根源是 `on_conflict_do_update` 逐行索引探测（WAL 条件下 47s，甚至慢于默认 journal 的 36s；`synchronous=NORMAL` 仅省 ~5s → 证明瓶颈不在 journal 模式）。另：上传流量不再过 openship-edge，**天然绕开边缘 body 上限**（同日刚踩 1MB 上限 413 坑，已调 100m）。
+- **备选**：
+  - 落库：(A) PRAGMA 调优（实测收益 ~5s，弃为主线）；(B) 内存去重 + 纯 executemany insert（**选**，5 倍提速）；(C) 维持现状。
+  - 上传：(A) OBS 预签名直传（**选**，复用 ADR-022 基建）；(B) 异步导入（体验"秒回"但实际总时长不变，引入状态机复杂度，弃）；(C) 维持 multipart 直传（受用户→源站公网带宽限制）。
+- **理由**：落库 (B) 与 upsert 语义完全一致（dict 覆盖 = on_conflict set_ 后写胜）且 5 倍收益；上传 (A) 与 ADR-022 导出下载**对称**（导出=后端内网上传/浏览器公网签名下载；导入=浏览器公网签名上传/后端内网拉取），复用 `oss_export._clients()` 双 endpoint 模式，28MB 流量不占源站带宽。
+- **影响**：
+  - `sales_importer.py`：去重直插重写 `_bulk_upsert` 语义（同文件重复行回归测试锁定）。
+  - 新 `backend/app/services/oss_upload.py`：`presign_put(key, expires)`（公网 virtual-host 签名 PUT）+ `fetch_to_file(key, path)`（内网拉取 + 拉完删对象，防桶膨胀）。
+  - 新端点：`POST /months/{m}/upload-ticket {kind}` → `{url, key}`（key=`salary/uploads/{month}/{kind}-{uuid}.xlsx`，10 分钟有效）；`POST /months/{m}/import-oss {kind, key}`（**校验 key 前缀格式**，防登录用户拉桶内任意对象 → 下载 → 复用现有导入）。
+  - 前端 `ImportStep`：ticket → XHR PUT（带进度条）→ import-oss；任一步失败回退旧 multipart 直传；`api.ts` 加封装。
+  - **桶 CORS 需加 PUT**（现仅 GET，ADR-022 时配置）：部署时 boto3 `put_bucket_cors` 一次性配置。
+  - 预期总时长：60-90s → **~15-20s**（传输数秒 + 解析 5.8s + 落库 8s）。
+- **决策过程**：用户反馈"上传太久"（2026-08-14）→ 容器内临时库分阶段基准定位落库为大头、传输次之 → 给方案 A（落库提速）/B（异步）/C（OBS 直传）→ **用户选 A+C 组合**。spec：`docs/superpowers/specs/2026-08-14-import-perf-design.md`
 
 ## ADR-014 主数据变更标 stale（治 H1）✅
 
