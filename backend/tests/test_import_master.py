@@ -136,6 +136,23 @@ def test_import_sales_empty_raw_persists_none(db_session):
     assert rec.extra is None
 
 
+def test_import_sales_dedup_later_row_wins(db_session):
+    """ADR-024 Part A：同文件重复键后写覆盖前写（内存去重与原 upsert 语义一致）"""
+    from backend.app.services.sales_importer import import_sales_to_db
+    from backend.app.db import SalesRecord
+
+    db = db_session
+    first = _line(0, 0)   # 唯一键：R0/店/日期/条码/金额 相同
+    later = _line(0, 0)
+    later.qty = Decimal(99)          # 后行 qty 不同（其余键字段相同）
+    later.product_name = "后写商品"
+    r = import_sales_to_db(db, "2026-01", [first, later], set())
+    assert r["total"] == 2
+    assert r["db_count"] == 1
+    row = db.query(SalesRecord).filter_by(month="2026-01").one()
+    assert row.qty == Decimal(99) and row.product_name == "后写商品"  # 后写胜
+
+
 def test_load_sales_from_rows_populates_raw_all_columns():
     """T6.2: load_sales_from_rows 把全部表头→值塞进 SalesLine.raw（含引擎不需要的列）。"""
     from salary_engine.importer import load_sales_from_rows
