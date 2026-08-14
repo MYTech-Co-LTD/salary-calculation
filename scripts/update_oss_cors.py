@@ -9,6 +9,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import base64
+import hashlib
+
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -25,9 +28,21 @@ client = boto3.client(
     config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
 )
 
+
+def _inject_content_md5(request, **kwargs):
+    """新版 botocore 默认发 x-amz-checksum-crc32，ZOS 只认 Content-MD5——按最终请求体补算注入。"""
+    if not request.headers.get("Content-MD5") and request.body:
+        request.headers["Content-MD5"] = base64.b64encode(
+            hashlib.md5(request.body).digest()).decode()
+
+
+client.meta.events.register("before-sign.s3.PutBucketLifecycleConfiguration", _inject_content_md5)
+
 try:
     rules = client.get_bucket_cors(Bucket=bucket)["CORSRules"]
-except client.exceptions.NoSuchCORSConfiguration:
+except ClientError as e:  # ZOS 未建模 NoSuch*Configuration 异常类，只能按错误码判断
+    if "NoSuch" not in str(e):
+        raise
     rules = []
 
 if any("PUT" in r.get("AllowedMethods", []) for r in rules):
@@ -58,10 +73,8 @@ def _rule_prefix(rule):
 
 try:
     lc_rules = client.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
-except client.exceptions.NoSuchLifecycleConfiguration:
-    lc_rules = []
-except ClientError as e:  # 个别 S3 兼容实现返回未建模的 NoSuchConfiguration
-    if "NoSuchConfiguration" not in str(e):
+except ClientError as e:  # ZOS 未建模 NoSuchLifecycleConfiguration，按错误码判断
+    if "NoSuch" not in str(e):
         raise
     lc_rules = []
 
