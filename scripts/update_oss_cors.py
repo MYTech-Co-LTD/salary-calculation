@@ -1,7 +1,7 @@
 # scripts/update_oss_cors.py
-"""桶 CORS 合并追加 PUT 规则（导入直传，ADR-024）。幂等，不动现有规则。
+"""桶 CORS 合并追加 PUT 规则 + uploads/ 前缀 1 天过期 lifecycle（导入直传，ADR-024）。
 
-用法（部署机 /opt/salary 下，env 已含 OSS_*）：
+幂等：均不动现有规则。用法（部署机 /opt/salary 下，env 已含 OSS_*）：
     docker exec openship-salary-calculation-backend python scripts/update_oss_cors.py
 """
 import os
@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import boto3
 from botocore.config import Config
+from botocore.exceptions import ClientError
 
 from backend.app.services.oss_export import _env
 
@@ -41,3 +42,38 @@ else:
     })
     client.put_bucket_cors(Bucket=bucket, CORSConfiguration={"CORSRules": rules})
     print(f"已向桶 {bucket} 追加 PUT CORS 规则（现有 {len(rules) - 1} 条保留）")
+
+# —— lifecycle：uploads/ 中转对象 1 天过期兜底（正常路径拉取即删，防异常残留堆积）——
+LIFECYCLE_ID = "uploads-expire-1d"
+uploads_prefix = f"{_env('OSS_PREFIX', 'salary/')}uploads/"
+
+
+def _rule_prefix(rule):
+    """兼容新旧两种 Filter 形态取前缀；无前缀规则返回 None。"""
+    f = rule.get("Filter")
+    if isinstance(f, dict) and "Prefix" in f:
+        return f["Prefix"]
+    return rule.get("Prefix")
+
+
+try:
+    lc_rules = client.get_bucket_lifecycle_configuration(Bucket=bucket).get("Rules", [])
+except client.exceptions.NoSuchLifecycleConfiguration:
+    lc_rules = []
+except ClientError as e:  # 个别 S3 兼容实现返回未建模的 NoSuchConfiguration
+    if "NoSuchConfiguration" not in str(e):
+        raise
+    lc_rules = []
+
+if any(r.get("ID") == LIFECYCLE_ID or _rule_prefix(r) == uploads_prefix for r in lc_rules):
+    print(f"lifecycle 规则 {LIFECYCLE_ID}（{uploads_prefix} 1 天过期）已存在，跳过")
+else:
+    lc_rules.append({
+        "ID": LIFECYCLE_ID,
+        "Filter": {"Prefix": uploads_prefix},
+        "Status": "Enabled",
+        "Expiration": {"Days": 1},
+    })
+    client.put_bucket_lifecycle_configuration(
+        Bucket=bucket, LifecycleConfiguration={"Rules": lc_rules})
+    print(f"已向桶 {bucket} 追加 lifecycle 规则 {LIFECYCLE_ID}：{uploads_prefix} 前缀 1 天过期")
