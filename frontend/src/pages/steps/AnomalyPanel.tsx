@@ -127,10 +127,14 @@ export default function AnomalyPanel({ month, onResolved }: AnomalyPanelProps) {
   };
 
   const handleSaveProduct = async () => {
+    if (!editProduct.name.trim()) {
+      toast.error("商品名称必填");
+      return;
+    }
     try {
       await productsApi.upsert({
         barcode: editProduct.barcode,
-        name: editProduct.name || undefined,
+        name: editProduct.name.trim(),
         category: editProduct.category || undefined,
         cost: editProduct.cost ? Number(editProduct.cost) : undefined,
         exclude_commission: editProduct.excludeCommission,
@@ -200,9 +204,14 @@ export default function AnomalyPanel({ month, onResolved }: AnomalyPanelProps) {
   };
 
   const handleSaveProductEdit = async () => {
+    if (!editProduct.name.trim()) {
+      toast.error("商品名称必填");
+      return;
+    }
     try {
       await productsApi.upsert({
         barcode: editProduct.barcode,
+        name: editProduct.name.trim(), // 后端 ProductUpsert.name 必填非空（防空档案），漏发会 422「更新商品失败」
         category: editProduct.category || undefined,
         cost: editProduct.cost ? Number(editProduct.cost) : undefined,
         exclude_commission: editProduct.excludeCommission,
