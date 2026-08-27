@@ -2,7 +2,7 @@
 
 > 本文件是项目架构决策的**权威记录**，记录每个已确认架构决策的**决策过程**（背景 / 备选 / 理由 / 影响），遵守 `CLAUDE.md` 铁律 3、4。详细设计见 `docs/superpowers/specs/`；本文只锁"是什么 + 为什么"。
 
-- 最近更新：2026-08-14（ADR-024 导入提速：去重直插 + OBS 中转上传）
+- 最近更新：2026-08-14（ADR-025 多文件导入：导入会话 + 预览确认）
 - 状态图例：✅ 已确认（锁定） · 📋 已规划后续
 - **本轮（计算数据流重构）架构已全部确认**（2026-07-19），可进入 writing-plans。
 
@@ -266,6 +266,22 @@
   - **桶 CORS 需加 PUT**（现仅 GET，ADR-022 时配置）：部署时 boto3 `put_bucket_cors` 一次性配置。
   - 预期总时长：60-90s → **~15-20s**（传输数秒 + 解析 5.8s + 落库 8s）。
 - **决策过程**：用户反馈"上传太久"（2026-08-14）→ 容器内临时库分阶段基准定位落库为大头、传输次之 → 给方案 A（落库提速）/B（异步）/C（OBS 直传）→ **用户选 A+C 组合**。spec：`docs/superpowers/specs/2026-08-14-import-perf-design.md`
+
+## ADR-025 多文件导入：导入会话 + 预览确认 ✅
+
+- **决策**：新增 `ImportSession` + `ImportFile` 两表，导入改两阶段会话流程（上传解析 → 预览报告 → 人工确认落库）。一个月可传多文件（销售按行内 `sale_date` 路由到月、自动建月）、让利多文件、补传=老文件+新文件一起重选。**合并语义 = 全量替换**（会话内某月文件集合 = 该月完整数据）。
+- **背景**：用户 2026-08-14 确认四场景全选（一月多文件 / 补传 / 让利多文件 / 跨月一起传）；数据质量要「导入前预览确认」（行级问题仍走现有异常检查 type1-7，导入时不拦截）；旧流程每月单文件上传即导入，多文件需手工合并。
+- **备选**：
+  - (A) 会话表方案（**选**）：`ImportSession`（status: pending/confirmed/expired + 预览 report JSON）+ `ImportFile`（kind/rows/解析状态/months 路由/active 标记），confirm 单事务按月 DELETE+insert。会话态在 DB（可审计、可作废），`ImportFile` 可作当月数据来自哪些文件的台账。
+  - (B) staging 目录即会话（无新表）：零 schema 改动但无事务性、无台账溯源、并发/过期全靠文件 mtime 自律——数据质量主诉求（可审计、状态明确）不达标，弃。
+- **理由**：预览确认必须有中间态持久化；会话表让 OBS/回退两路上传汇入同一会话；`active_files(db, month, kind)` helper 取代 `Month.sales_file/gifts_file` 单路径读方（读写对称，篡位旧字段）。让利明细沿用 ADR-023 不落库，keys/qty map 每次从 active 文件现场解析合并（(receipt,barcode) 后写覆盖，与 sales 去重口径一致）。全量替换护栏：报告显示每涉及月「现有 N 行 → 替换后 M 行」，M 明显小于 N 红字警示（防补传忘带老文件换薄整月）。
+- **影响**：
+  - 新端点：`POST /imports/sessions`、`/imports/sessions/{id}/tickets`（session 级 OBS key，`oss_upload.key_matches` 泛化 scope）、`/files`（OBS）、`/files-multipart`（回退）、`GET /imports/sessions/{id}`（预览报告）、`POST .../confirm`、`DELETE .../files/{fid}`。全部需登录。
+  - confirm 原子动作（单事务）：涉及月=路由月∪month_context → 自动建月 → 会话含 sales 文件则替换该月 sales（无 sales 文件仅 gifts 变更时沿用现有文件只重打 tag）→ 合并 gift_keys/qty map → DELETE+内存去重批插（ADR-024 语义）→ active 翻转 → `results_stale=True`。
+  - 生命周期：会话含 bad 文件 confirm 409（须移除）；status≠pending 409；新建会话时 24h 过期旧会话标 expired + 清 staging；confirmed 会话目录永不清（台账）。
+  - 旧四端点（import-sales/import-gifts/upload-ticket/import-oss）**原样保留**（脚本兼容 + 回退），UI 全面切会话流程。
+  - 前端 `ImportStep` 重构：DropZone 多选、逐文件 ticket→PUT→入会话（进度 i/n + 当前%）、预览报告面板（文件清单/按月统计/替换行数对比红字）+ 确认按钮。
+- **决策过程**：用户 2026-08-14 反馈多文件/补传/跨月场景 → 澄清四场景 + 数据质量（预览确认）+ 合并语义（全量替换）→ 方案 A/B 对比 → **用户选 A**。spec：`docs/superpowers/specs/2026-08-14-multi-file-import-design.md`
 
 ## ADR-014 主数据变更标 stale（治 H1）✅
 
