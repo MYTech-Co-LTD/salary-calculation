@@ -263,7 +263,7 @@
   - 新 `backend/app/services/oss_upload.py`：`presign_put(key, expires)`（公网 virtual-host 签名 PUT）+ `fetch_to_file(key, path)`（内网拉取 + 拉完删对象，防桶膨胀）。
   - 新端点：`POST /months/{m}/upload-ticket {kind}` → `{url, key}`（key=`salary/uploads/{month}/{kind}-{uuid}.xlsx`，10 分钟有效）；`POST /months/{m}/import-oss {kind, key}`（**校验 key 前缀格式**，防登录用户拉桶内任意对象 → 下载 → 复用现有导入）。
   - 前端 `ImportStep`：ticket → XHR PUT（带进度条）→ import-oss；任一步失败回退旧 multipart 直传；`api.ts` 加封装。
-  - **桶 CORS 需加 PUT**（现仅 GET，ADR-022 时配置）：部署时 boto3 `put_bucket_cors` 一次性配置。
+  - **桶 CORS 需加 PUT**（现仅 GET，ADR-022 时配置）：部署时 boto3 `put_bucket_cors` 一次性配置。**ZOS 预检“首条规则短路”坑（2026-08-27 生产踩坑）**：GET/HEAD、PUT 分成两条同 Origin(*) 规则时，浏览器 OPTIONS 预检命中第一条即拒绝 PUT（403 "method not whitelisted" 且无 CORS 头 → 前端报「上传到对象存储失败」），必须**合并为单条 GET/HEAD/PUT 规则**（已修 `scripts/update_oss_cors.py` 为强制合并单条，幂等）。
   - 预期总时长：60-90s → **~15-20s**（传输数秒 + 解析 5.8s + 落库 8s）。
 - **决策过程**：用户反馈"上传太久"（2026-08-14）→ 容器内临时库分阶段基准定位落库为大头、传输次之 → 给方案 A（落库提速）/B（异步）/C（OBS 直传）→ **用户选 A+C 组合**。spec：`docs/superpowers/specs/2026-08-14-import-perf-design.md`
 

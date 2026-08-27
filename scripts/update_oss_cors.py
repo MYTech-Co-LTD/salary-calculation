@@ -38,6 +38,18 @@ def _inject_content_md5(request, **kwargs):
 
 client.meta.events.register("before-sign.s3.PutBucketLifecycleConfiguration", _inject_content_md5)
 
+# ⚠ ZOS 预检“首条规则短路”坑（2026-08-27 生产踩坑）：多条同 Origin(*) 规则时，浏览器
+# OPTIONS 预检按 Origin 命中第一条（GET/HEAD）后只在该条方法集内校验，即使另一条
+# 单独含 PUT 也返回 403 "The request method are not whitelisted" 且无 CORS 响应头 →
+# 浏览器拦截 XHR 直传。必须把 GET/HEAD/PUT 合并为单条规则。
+MERGED_RULE = [{
+    "AllowedMethods": ["GET", "HEAD", "PUT"],
+    "AllowedOrigins": ["*"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3000,
+}]
+
 try:
     rules = client.get_bucket_cors(Bucket=bucket)["CORSRules"]
 except ClientError as e:  # ZOS 未建模 NoSuch*Configuration 异常类，只能按错误码判断
@@ -45,18 +57,11 @@ except ClientError as e:  # ZOS 未建模 NoSuch*Configuration 异常类，只�
         raise
     rules = []
 
-if any("PUT" in r.get("AllowedMethods", []) for r in rules):
-    print("PUT 规则已存在，跳过")
+if len(rules) == 1 and set(rules[0].get("AllowedMethods", [])) == {"GET", "HEAD", "PUT"}:
+    print("CORS 已是合并单条规则，跳过")
 else:
-    rules.append({
-        "AllowedMethods": ["PUT"],
-        "AllowedOrigins": ["*"],
-        "AllowedHeaders": ["*"],
-        "ExposeHeaders": ["ETag"],
-        "MaxAgeSeconds": 3000,
-    })
-    client.put_bucket_cors(Bucket=bucket, CORSConfiguration={"CORSRules": rules})
-    print(f"已向桶 {bucket} 追加 PUT CORS 规则（现有 {len(rules) - 1} 条保留）")
+    client.put_bucket_cors(Bucket=bucket, CORSConfiguration={"CORSRules": MERGED_RULE})
+    print(f"已将桶 {bucket} 的 CORS 合并为单条 GET/HEAD/PUT 规则（原 {len(rules)} 条：{rules}）")
 
 # —— lifecycle：uploads/ 中转对象 1 天过期兜底（正常路径拉取即删，防异常残留堆积）——
 LIFECYCLE_ID = "uploads-expire-1d"
