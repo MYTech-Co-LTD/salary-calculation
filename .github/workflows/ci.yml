@@ -47,19 +47,43 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # 并行 agent 同时合并 → 部署排队，不互相抢（详见 docs/architecture/ci.md）
+    concurrency:
+      group: deploy-${{ github.repository }}
+      cancel-in-progress: false
     steps:
       - name: Trigger openship deploy
         env:
           OPENSHIP_TOKEN: ${{ secrets.OPENSHIP_TOKEN }}
+          # 控制面地址必须带 /api/proxy 前缀：裸 /api/* 会被 edge 路由给 dashboard 壳，回 403/404。
+          # 做成变量是为了换环境不改工作流；缺省即公司控制面。
+          OPENSHIP_URL: ${{ vars.OPENSHIP_URL || 'https://deploy.hookflow.cn/api/proxy' }}
+          PROJECT_ID: proj_gQCXaFXxQ8K5UVGd
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          RESP=$(curl -sS -w "\n%{http_code}" -X POST "https://deploy.hookflow.cn/api/deployments" \
-            -H "Authorization: Bearer $OPENSHIP_TOKEN" \
-            -H "Content-Type: application/json" \
-            -d "{\"projectId\":\"proj_gQCXaFXxQ8K5UVGd\",\"branch\":\"main\",\"commitSha\":\"${{ github.sha }}\",\"environment\":\"production\"}")
-          CODE=$(printf '%s\n' "$RESP" | tail -n1)
-          BODY=$(printf '%s\n' "$RESP" | sed '$d')
-          echo "openship HTTP ${CODE}"
-          case "$CODE" in
-            2*) echo "部署触发成功";;
-            *) echo "部署触发失败: $BODY"; exit 1;;
-          esac
+          set -euo pipefail
+          echo "openship: project=${PROJECT_ID} commit=${COMMIT_SHA}"
+          # commitSha 是幂等键：同一个 sha 重复触发不会部署出两份。
+          # 同项目同一时刻只允许一个部署：并发时 API 回 "already in progress"，等待重试即可，
+          # 不要当失败（curl 不用 -f：-f 会丢掉 body，无法区分「互斥等待」与「真失败」）。
+          for i in $(seq 1 10); do
+            CODE=$(curl -sS -o /tmp/openship-deploy.json -w '%{http_code}' -X POST "${OPENSHIP_URL%/}/api/deployments" \
+              -H "Authorization: Bearer ${OPENSHIP_TOKEN}" \
+              -H 'Content-Type: application/json' \
+              -d "{\"projectId\":\"${PROJECT_ID}\",\"branch\":\"main\",\"commitSha\":\"${COMMIT_SHA}\",\"environment\":\"production\"}")
+            if [ "${CODE:0:1}" = "2" ]; then
+              echo "部署触发成功（HTTP ${CODE}）："
+              cat /tmp/openship-deploy.json
+              exit 0
+            fi
+            BODY=$(cat /tmp/openship-deploy.json 2>/dev/null || true)
+            echo "第 ${i}/10 次触发：HTTP ${CODE} ${BODY:0:200}"
+            if ! grep -q 'already in progress' /tmp/openship-deploy.json 2>/dev/null; then
+              echo "::error::部署触发失败（非互斥错误，不重试）"
+              exit 1
+            fi
+            echo "既有部署在跑，30s 后重试"
+            sleep 30
+          done
+          echo "::error::等待既有部署完成超时（约 5 分钟）——去控制面看卡住的部署"
+          exit 1
